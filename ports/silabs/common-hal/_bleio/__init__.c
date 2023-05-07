@@ -41,6 +41,7 @@
 STATIC conn_state_t conn_state;
 osMutexId_t bluetooth_connection_mutex_id;
 bleio_adapter_obj_t common_hal_bleio_adapter_obj;
+uint8_t ble_bonding_handle = 0xFF;
 
 __ALIGNED(4) static uint8_t bluetooth_connection_mutex_cb[osMutexCbSize];
 const osMutexAttr_t bluetooth_connection_mutex_attr = {
@@ -128,6 +129,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt) {
                 "CIRCUITPY-%X%X",address.addr[1], address.addr[0]);
             sl_bt_gatt_server_write_attribute_value(gattdb_device_name,
                 0,14,device_name);
+            sl_bt_sm_store_bonding_configuration(5, 2);
 
             sc = sl_bt_sm_configure(0x00,sl_bt_sm_io_capability_noinputnooutput);
             if (SL_STATUS_OK != sc) {
@@ -138,7 +140,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt) {
             if (SL_STATUS_OK != sc) {
                 mp_raise_bleio_BluetoothError(translate("Set bondable mode fail"));
             }
-            sl_bt_sm_delete_bondings();
+
             break;
 
         // This event indicates that a new connection was opened.
@@ -155,13 +157,8 @@ void sl_bt_on_event(sl_bt_msg_t *evt) {
                 bleio_connections[0].mtu = 0;
             }
 
-            sc = sl_bt_sm_increase_security(
-                evt->data.evt_connection_opened.connection);
+            ble_bonding_handle = evt->data.evt_connection_opened.bonding;
 
-            if (SL_STATUS_OK != sc) {
-                mp_raise_bleio_BluetoothError(
-                    translate("Increase security fail."));
-            }
             osMutexRelease(bluetooth_connection_mutex_id);
             break;
 
@@ -179,6 +176,8 @@ void sl_bt_on_event(sl_bt_msg_t *evt) {
             break;
 
         case sl_bt_evt_connection_closed_id:
+            // reset bonding handle variable to avoid deleting wrong bonding info
+            ble_bonding_handle = 0xFF;
             common_hal_bleio_adapter_remove_connection(
                 evt->data.evt_connection_closed.connection);
             break;
@@ -378,6 +377,19 @@ void sl_bt_on_event(sl_bt_msg_t *evt) {
             break;
 
         case sl_bt_evt_sm_bonding_failed_id:
+
+            if (evt->data.evt_sm_bonding_failed.reason == SL_STATUS_BT_SMP_PASSKEY_ENTRY_FAILED ||
+                evt->data.evt_sm_bonding_failed.reason == SL_STATUS_TIMEOUT ||
+                evt->data.evt_sm_bonding_failed.reason == SL_STATUS_BT_SMP_UNSPECIFIED_REASON) {
+                sl_bt_sm_increase_security(evt->data.evt_sm_bonding_failed.connection);
+            } else if (evt->data.evt_sm_bonding_failed.reason == SL_STATUS_BT_SMP_PAIRING_NOT_SUPPORTED ||
+                       evt->data.evt_sm_bonding_failed.reason == SL_STATUS_BT_CTRL_PIN_OR_KEY_MISSING) {
+                if (ble_bonding_handle != 0xFF) {
+                    sl_bt_sm_delete_bonding(ble_bonding_handle);
+                    ble_bonding_handle = 0xFF;
+                }
+                sl_bt_sm_increase_security(evt->data.evt_sm_bonding_failed.connection);
+            }
             break;
 
         case sl_bt_evt_connection_parameters_id:
